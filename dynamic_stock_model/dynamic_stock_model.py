@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Class DynamicStockModel, DSM. Version 1.0. 
-Last change: May 24th, 2015. 
+Last change: August 28th, 2018. 
 Check https://github.com/stefanpauliuk/pyDSM for latest version.
 
 Methods for efficient handling of dynamic stock models (DSMs)
@@ -25,7 +25,7 @@ Repository for this class, documentation, and tutorials: https://github.com/stef
 
 import numpy as np
 import scipy.stats
-
+import scipy.linalg
 
 
 class DynamicStockModel(object):
@@ -46,6 +46,7 @@ class DynamicStockModel(object):
     lt : lifetime distribution: dictionary
 
     pdf: probability density function, distribution of outflow from a specific age-cohort
+    cdf: cumulative density function
 
 
     name : string, optional
@@ -56,9 +57,10 @@ class DynamicStockModel(object):
     Basic initialisation and dimension check methods
     """
 
-    def __init__(self, t=None, i=None, o=None, s=None, lt=None, s_c=None, o_c=None, name='DSM', pdf=None):
+    def __init__(self, t=None, i=None, o=None, s=None, lt=None, s_c=None, o_c=None, name='DSM', pdf=None, cdf=None):
         """ Init function. Assign the input data to the instance of the object."""
         self.t = t  # optional
+        self._tt = np.tril(scipy.linalg.circulant(self.t)) # 
 
         self.i = i  # optional
 
@@ -79,10 +81,11 @@ class DynamicStockModel(object):
         self.name = name  # optional
 
         self.pdf = pdf # optional
+        self.cdf = cdf # optional
 
     def return_version_info(self):
         """Return a brief version statement for this class."""
-        return str('Class DynamicStockModel, DSM. Version 1.0. Last change: May 9th, 2015. Check https://github.com/stefanpauliuk/pyDSM for latest version.')
+        return str('Class DynamicStockModel, DSM. Version 1.0. Last change: August 28th, 2018. Check https://github.com/stefanpauliuk/pyDSM for latest version.')
 
     """ Part 1: Checks and balances: """
 
@@ -192,7 +195,7 @@ class DynamicStockModel(object):
         The shape of the output pdf array is NoofYears * NoofYears
         """
         if self.pdf is None:
-            self.pdf = np.zeros((len(self.t), len(self.t)))
+            # self.pdf = np.zeros((len(self.t), len(self.t)))
             # Perform specific computations and checks for each lifetime distribution:
 
             if self.lt['Type'] == 'Fixed':
@@ -203,10 +206,9 @@ class DynamicStockModel(object):
                 ExitFlag = 1
 
             if self.lt['Type'] == 'Normal':
-                for m in range(0, len(self.t)):  # cohort index
-                    # year index, year larger or equal than cohort
-                    for n in range(m + 1, len(self.t)):
-                        self.pdf[n, m] = scipy.stats.norm(self.lt['Mean'][m], self.lt['StdDev'][m]).pdf(n - m)  # Call scipy's Norm function with Mean, StdDev, and Age
+                self.pdf = scipy.stats.norm(np.tri(len(self.t),k=-1)*self.lt['Mean'],
+                                            np.tri(len(self.t),k=-1)*self.lt['StdDev']).pdf(self._tt)
+                self.pdf[np.isnan(self.pdf)] = 0
                 ExitFlag = 1
 
             if self.lt['Type'] == 'Weibull': # Equivalent to the Frechet distribution
@@ -251,16 +253,17 @@ class DynamicStockModel(object):
     def compute_s_c_inflow_driven(self):
         """ With given inflow and lifetime distribution, the method builds the stock by cohort.
         """
+        if self.cdf is None:
+            self.cdf = scipy.stats.norm(np.tri(len(self.t),k=-1)*self.lt['Mean'],
+                                            np.tri(len(self.t),k=-1)*self.lt['StdDev']).cdf(self._tt)
+            self.cdf[np.isnan(self.cdf)] = 0
+            self.anticdf = 1-self.cdf
+            self.anticdf[np.triu_indices(len(self.t),k=1)] = 0
+
         if self.i is not None:
             if self.lt is not None:
-                self.s_c = np.zeros((len(self.i), len(self.i)))
-                # construct the pdf of a product of cohort tc leaving the stock in year t
-                self.compute_outflow_pdf()
-                for m in range(0, len(self.i)):  # cohort index
-                    self.s_c[m, m] = self.i[m]  # inflow on diagonal
-                    for n in range(m, len(self.i)):  # year index, year >= cohort year
-                        self.s_c[n, m] = self.i[m] * (1 - self.pdf[0:n + 1, m].sum())
-                    ExitFlag = 1
+                self.s_c = self.i * self.anticdf
+                ExitFlag = 1
                 return self.s_c, ExitFlag
             else:
                 ExitFlag = 2  # No lifetime distribution specified
@@ -274,9 +277,7 @@ class DynamicStockModel(object):
         if self.s_c is not None:
             if self.o_c == None:
                 self.o_c = np.zeros(self.s_c.shape)
-                for m in range(0, len(self.s_c)):  # for all cohorts
-                    for n in range(m + 1, len(self.s_c)):  # for all years each cohort exists
-                        self.o_c[n, m] = self.s_c[n - 1, m] - self.s_c[n, m]
+                self.o_c[1:,:] = np.tril(-np.diff(self.s_c,axis=0))
                 ExitFlag = 1
                 return self.o_c, ExitFlag
             else:
